@@ -1,0 +1,131 @@
+
+
+
+
+
+################# Step 3.2.2 set permission to labsuser.pem file  #################
+
+chmod 400 labsuser.pem
+
+
+################# Step 3.2.5 copy files from EC2 instance #################
+
+scp -r -i ~/environment/labsuser.pem ubuntu@10.16.10.120:/home/ubuntu/resources/codebase_partner/* ~/environment/temp/
+
+
+################# Step 3.3 create folders for microservices #################
+
+mkdir microservices
+
+cd microservices
+
+mkdir customer
+
+mkdir employee
+
+
+################# Step 3.3 copy the files into both folders and delete temp folder #################
+
+cp -r ~/environment/temp/* ~environment/microservices/customer/
+
+mv -f ~/environment/temp/* ~environment/microservices/employee/
+
+rmdir ~/environment/temp/
+
+
+################# Step 3.4 create CodeCommit repository and add to project #################
+
+cd ~/environment/microservices
+git init
+git branch -m dev 
+git add .
+git commit -m 'two unmodified copies of the application code'
+git remote add origin https://git-codecommit.us-east-1.amazonaws.com/v1/repos/microservices
+git push -u origin dev
+
+
+################# Step 3.4 create CodeCommit repository and add to project #################
+
+################# Step 4.3 make changes to customer microservice and create a docker image #################
+
+docker build --tag customer .
+
+dbEndpoint=$(cat ~/environment/microservices/customer/app/config/config.js | grep 'APP_DB_HOST' | cut -d '"' -f2)
+echo $dbEndpoint
+
+docker run -d --name customer_1 -p 8080:8080 -e APP_DB_HOST="$dbEndpoint" customer
+
+################# Step 4.4 make changes to employee microservice and create a docker image #################
+
+cd ~/environment/microservices/employee
+grep -n 'redirect' app/controller/supplier.controller.js
+
+
+################# Step 4.5 make changes to employee microservice and create a docker image #################
+
+docker build --tag employee .
+
+dbEndpoint=$(cat ~/environment/microservices/employee/app/config/config.js | grep 'APP_DB_HOST' | cut -d '"' -f2)
+echo $dbEndpoint
+
+docker run -d --name employee_1 -p 8081:8081 -e APP_DB_HOST="$dbEndpoint" employee
+
+### deletes existing docker instance ###
+docker rm -f employee_1 
+
+
+################# Step 5.1 adding docker images to container registry repos ################# 
+
+### Login ###
+
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $account_id.dkr.ecr.us-east-1.amazonaws.com
+
+### Upload images ###
+docker push $account_id.dkr.ecr.us-east-1.amazonaws.com/customer:latest
+docker push $account_id.dkr.ecr.us-east-1.amazonaws.com/employee:latest
+
+
+################# Step 5.3 create new repository for deployment ################# 
+
+cd ~/environment/
+mkdir deployment
+git init
+git branch -m dev
+git remote add origin https://git-codecommit.us-east-1.amazonaws.com/v1/repos/deployment
+
+git status
+
+
+################# Step 5.4 register new tasks in ECS ################# 
+
+aws ecs register-task-definition --cli-input-json "file:///home/ec2-user/environment/deployment/taskdef-customer.json"
+
+aws ecs register-task-definition --cli-input-json "file:///home/ec2-user/environment/deployment/taskdef-employee.json"
+
+################# Steps 7.1-2 create services for customer and employee ################# 
+
+cd ~/environment/deployment
+aws ecs create-service --service-name customer-microservice --cli-input-json file://create-customer-microservice-tg-two.json
+
+aws ecs create-service --service-name employee-microservice --cli-input-json file://create-employee-microservice-tg-two.json
+
+
+################# Step 9.2 Adjust the UI for the employee microservice ################# 
+
+docker rm -f employee_1 
+cd ~/environment/microservices/employee
+docker build --tag employee .
+dbEndpoint=$(cat ~/environment/microservices/employee/app/config/config.js | grep 'APP_DB_HOST' | cut -d '"' -f2)
+echo $dbEndpoint
+account_id=$(aws sts get-caller-identity |grep Account|cut -d '"' -f4)
+echo $account_id
+docker tag employee:latest $account_id.dkr.ecr.us-east-1.amazonaws.com/employee:latest
+
+#refresh credentials in case needed
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $account_id.dkr.ecr.us-east-1.amazonaws.com
+#push the image
+docker push $account_id.dkr.ecr.us-east-1.amazonaws.com/employee:latest
+
+################# Step 9.5 Scale the customer microservice ################# 
+
+aws ecs update-service --cluster microservices-serverlesscluster --service customer-microservice --desired-count 3
